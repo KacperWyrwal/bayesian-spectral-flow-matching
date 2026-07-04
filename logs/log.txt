@@ -1,0 +1,5 @@
+full sobolev ; 1D-W 2.4058
+standard: 1D-W 3.184
+only intial matern dist : 1D-W 3.1802
+only soboblev loss : 1D-W 2.4117
+only soboblev loss + OT : 1D-W 2.6

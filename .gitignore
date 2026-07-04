@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Large MD trajectory arrays (GitHub 100MB limit). Re-download with:
+#   python Dataset/dowload_script.py
+Dataset/AD3/**/*.npz

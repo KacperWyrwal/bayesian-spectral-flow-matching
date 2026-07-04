@@ -1,0 +1,9 @@
+\beamer@sectionintoc {1}{Synthetic benchmark dataset}{3}{0}{1}
+\beamer@sectionintoc {2}{Setting \& method}{8}{0}{2}
+\beamer@sectionintoc {3}{Experiment: component ablation}{10}{0}{3}
+\beamer@sectionintoc {4}{Experiment: $L_{\max }$ sweep}{19}{0}{4}
+\beamer@sectionintoc {5}{Experiment: neural operator velocity field}{23}{0}{5}
+\beamer@sectionintoc {6}{Standard $S^2$ spherical-harmonic signals}{28}{0}{6}
+\beamer@sectionintoc {7}{Experiment: AD3 molecular benchmark}{29}{0}{7}
+\beamer@sectionintoc {8}{Summary}{42}{0}{8}
+\beamer@sectionintoc {9}{Theory: why Mat\'ern + Sobolev loss?}{43}{0}{9}
