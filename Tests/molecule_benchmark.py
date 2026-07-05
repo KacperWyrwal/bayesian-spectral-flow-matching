@@ -6,8 +6,11 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from typing import Optional
 
 import Dataset.molecule_graph as molecule_graph
+import Dataset.dihedrals as dihedrals
+import Dataset.energy as energy
 import Flows.config as config
 import models.architecture as MA
 from Flows.trainer import Trainer
@@ -16,10 +19,85 @@ from Tests.metrics import (
     sobolev_wasserstein_distance,
     wasserstein_distance,
 )
+from Tests.boltzmann_metrics import (
+    energy_wasserstein_w2,
+    kish_ess,
+    resample_weighted,
+    snis_log_weights,
+    torus_wasserstein_w2,
+)
 
 N_ATOMS = molecule_graph.N_ATOMS_AD3
 STATE_DIM = molecule_graph.STATE_DIM
 GRAPH_FNO_TYPES = {"graph_laplacian_fno", "graph_sobolev_fno"}
+
+
+def _evaluate_falcon_metrics(
+    x_gen_np: np.ndarray,
+    x_true_np: np.ndarray,
+    pdb_path,
+    temperature_k: float = 310.0,
+    log_p_gen: Optional[np.ndarray] = None,
+    snis: bool = False,
+    snis_seed: int = 0,
+) -> dict:
+    """Compute T-W2, E-W2, and optional SNIS-reweighted metrics."""
+    pos_gen = dihedrals.features_to_positions(x_gen_np)
+    pos_true = dihedrals.features_to_positions(x_true_np)
+
+    dih_gen = dihedrals.ad3_backbone_dihedrals(pos_gen)
+    dih_true = dihedrals.ad3_backbone_dihedrals(pos_true)
+
+    energy_eval = energy.AD3EnergyEvaluator(
+        pdb_path=pdb_path, temperature_k=temperature_k
+    )
+    e_gen = energy_eval.evaluate_potential_energy(pos_gen)
+    e_true = energy_eval.evaluate_potential_energy(pos_true)
+    kbt = energy.kbt_kj_mol(temperature_k)
+
+    t_w2_raw = torus_wasserstein_w2(dih_gen, dih_true)
+    e_w2_raw = energy_wasserstein_w2(e_gen, e_true)
+    print(f"T-W2 (raw proposal): {t_w2_raw:.4f}")
+    print(f"E-W2 (raw proposal): {e_w2_raw:.4f}")
+
+    result = {
+        "t_w2_raw": t_w2_raw,
+        "e_w2_raw": e_w2_raw,
+    }
+
+    if not snis:
+        return result
+
+    if log_p_gen is None:
+        raise ValueError("snis=True requires log_p_gen from infer_with_logprob.")
+
+    log_w = snis_log_weights(e_gen, log_p_gen, kbt)
+    ess = kish_ess(log_w)
+    print(f"SNIS ESS (normalized): {ess:.4f}")
+    if ess < 0.01:
+        print(
+            "Warning: ESS < 0.01 — SNIS reweighted metrics may be unreliable. "
+            "Consider more ODE steps or Dopri5 integration."
+        )
+
+    x_resampled = resample_weighted(x_gen_np, log_w, n_out=x_gen_np.shape[0], seed=snis_seed)
+    pos_resampled = dihedrals.features_to_positions(x_resampled)
+    dih_resampled = dihedrals.ad3_backbone_dihedrals(pos_resampled)
+    e_resampled = energy_eval.evaluate_potential_energy(pos_resampled)
+
+    t_w2_reweighted = torus_wasserstein_w2(dih_resampled, dih_true)
+    e_w2_reweighted = energy_wasserstein_w2(e_resampled, e_true)
+    print(f"T-W2 (SNIS-reweighted): {t_w2_reweighted:.4f}")
+    print(f"E-W2 (SNIS-reweighted): {e_w2_reweighted:.4f}")
+
+    result.update(
+        {
+            "ess": ess,
+            "t_w2_reweighted": t_w2_reweighted,
+            "e_w2_reweighted": e_w2_reweighted,
+        }
+    )
+    return result
 
 
 def benchmark_molecule_ad3(
@@ -51,7 +129,23 @@ def benchmark_molecule_ad3(
     graph_type="bond",
     heat_sigma=None,
     heat_cutoff_nm=None,
+    falcon_metrics=False,
+    snis=False,
+    temperature_k: float = 310.0,
+    snis_seed: int = 0,
 ):
+    if falcon_metrics and test_samples < 10000:
+        test_samples = 10000
+        print(f"falcon_metrics=True: using test_samples={test_samples}")
+
+    if snis and not falcon_metrics:
+        falcon_metrics = True
+
+    if snis and model_type != "mlp":
+        raise NotImplementedError(
+            "SNIS benchmarking is currently supported for model_type='mlp' only."
+        )
+
     pdb_path = pdb_path or molecule_graph.DEFAULT_TRAIN_PDB
     train_npz = train_npz or molecule_graph.DEFAULT_TRAIN_NPZ
     test_npz = test_npz or molecule_graph.DEFAULT_TEST_NPZ
@@ -171,7 +265,14 @@ def benchmark_molecule_ad3(
         trainer.train()
         trainer.save_checkpoint(checkpoint_path)
 
-    x_generated = trainer.infer(num_samples=test_samples)
+    log_p_gen = None
+    if snis:
+        x_generated, log_p_gen_t, _ = trainer.infer_with_logprob(num_samples=test_samples)
+        x_generated = x_generated.detach()
+        log_p_gen = log_p_gen_t.detach().cpu().numpy()
+    else:
+        x_generated = trainer.infer(num_samples=test_samples)
+
     x_generated = x_generated[-1] if x_generated.dim() == 3 else x_generated
     x_true = eval_sampler(test_samples, STATE_DIM, trainer.flow_config.device)
 
@@ -198,6 +299,18 @@ def benchmark_molecule_ad3(
         f"std={rmsd_stats['std']:.4f}"
     )
     metrics["rmsd"] = rmsd_stats
+
+    if falcon_metrics:
+        falcon = _evaluate_falcon_metrics(
+            x_gen_np,
+            x_true_np,
+            pdb_path=pdb_path,
+            temperature_k=temperature_k,
+            log_p_gen=log_p_gen,
+            snis=snis,
+            snis_seed=snis_seed,
+        )
+        metrics.update(falcon)
 
     if plot:
         _plot_conformers(x_gen_np, x_true_np, title="Generated vs true AD3 conformers")
@@ -246,6 +359,10 @@ def compare_models_molecule(
     graph_type="bond",
     heat_sigma=None,
     heat_cutoff_nm=None,
+    falcon_metrics=False,
+    snis=False,
+    temperature_k: float = 310.0,
+    snis_seed: int = 0,
 ):
     """Compare mlp / fno1d / graph_laplacian_fno / graph_sobolev_fno on AD3.
 
@@ -284,6 +401,10 @@ def compare_models_molecule(
         graph_type=graph_type,
         heat_sigma=heat_sigma,
         heat_cutoff_nm=heat_cutoff_nm,
+        falcon_metrics=falcon_metrics,
+        snis=snis,
+        temperature_k=temperature_k,
+        snis_seed=snis_seed,
     )
     model_types = ("mlp", "fno1d", "graph_laplacian_fno", "graph_sobolev_fno")
     results = {}

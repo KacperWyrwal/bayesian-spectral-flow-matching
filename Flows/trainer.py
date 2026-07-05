@@ -8,6 +8,7 @@ import Flows.config as config
 import Flows.matern_sampler as matern_sampler
 import models.architecture as MA
 import Flows.infer as infer
+import Flows.logprob as logprob
 import Dataset.MoG as MoG
 import OT.sampler as ot_sampler
 
@@ -169,6 +170,30 @@ class Trainer:
             num_samples = x0.shape[0]
         flow_output = infer.infer(self.model, x0, self.flow_config)
         return flow_output
+
+    def infer_with_logprob(self, num_samples=256, x0=None, num_steps=None):
+        """Generate samples and log p_theta(x) via CNF change of variables."""
+        if x0 is None:
+            x0 = self.source_sampler(
+                num_samples,
+                self.model_config.input_dim,
+                self.flow_config.device,
+            )
+        else:
+            x0 = x0.to(self.flow_config.device)
+            num_samples = x0.shape[0]
+
+        model_type = getattr(self.model_config, "model_type", "mlp")
+        source_log_prob_fn = logprob.make_source_log_prob_fn(self.flow_config)
+        x1, log_p1 = logprob.infer_with_logprob(
+            self.model,
+            x0,
+            self.flow_config,
+            source_log_prob_fn,
+            model_type=model_type,
+            num_steps=num_steps,
+        )
+        return x1, log_p1, x0
     
     def visualize_paths(self, flow_output=None):
         """Visualize integration paths."""
